@@ -2,53 +2,69 @@
  * Car Key Fob Trigger - BLE Control
  * 
  * WIRING:
- * PIN 020 ──[220Ω]── PC817C Pin 1 (Anode, dot side)
- * GND ────────────── PC817C Pin 2 (Cathode)
- * PC817C Pin 3 ───── Key fob button wire A
- * PC817C Pin 4 ───── Key fob button wire B
+ * LOCK BUTTON (Optocoupler 1):
+ *   PIN 020 ──[220Ω]── PC817C Pin 1 (Anode, dot side)
+ *   GND ────────────── PC817C Pin 2 (Cathode)
+ *   PC817C Pin 3&4 ─── Key fob LOCK button
  * 
- * PHONE APP: Use "nRF Connect" or "Bluefruit Connect"
- * - Connect to "KeyFob"
- * - Send "p" or "press" to trigger button
+ * UNLOCK BUTTON (Optocoupler 2):
+ *   PIN 022 ──[220Ω]── PC817C Pin 1 (Anode, dot side)
+ *   GND ────────────── PC817C Pin 2 (Cathode)
+ *   PC817C Pin 3&4 ─── Key fob UNLOCK button
+ * 
+ * PHONE APP: "Bluefruit Connect"
+ * - Button 1 = LOCK, Button 2 = UNLOCK
+ * - No password required
  */
 
 #include <Arduino.h>
 #include <bluefruit.h>
 
-#define TRIGGER_PIN 20  // P0.20 - controls optocoupler (with 220Ω resistor)
+#define LOCK_PIN 20     // P0.20 - controls LOCK optocoupler
+#define UNLOCK_PIN 22   // P0.22 - controls UNLOCK optocoupler
 #define STATUS_LED 15   // P0.15 - red LED
 
 // BLE UART Service
 BLEUart bleuart;
 
-void pressButton() {
-  // HIGH = current flows through optocoupler = button pressed
-  digitalWrite(TRIGGER_PIN, HIGH);
-}
+// Forward declarations
+bool pairing_passkey_callback(uint16_t conn_handle, uint8_t const passkey[6], bool match_request);
+void secured_callback(uint16_t conn_handle);
 
-void releaseButton() {
-  // LOW = no current = button released  
-  digitalWrite(TRIGGER_PIN, LOW);
-}
-
-void triggerKeyFob() {
-  Serial.println(">>> BUTTON PRESS");
-  bleuart.println("Pressing button...");
+void pressLock() {
+  Serial.println(">>> LOCK");
+  bleuart.println("Locking...");
   digitalWrite(STATUS_LED, HIGH);
   
-  pressButton();
-  delay(300);  // Hold button for 300ms
-  releaseButton();
+  digitalWrite(LOCK_PIN, HIGH);
+  delay(300);
+  digitalWrite(LOCK_PIN, LOW);
   
   digitalWrite(STATUS_LED, LOW);
-  Serial.println(">>> BUTTON RELEASED");
-  bleuart.println("Done!");
+  Serial.println(">>> LOCK COMPLETE");
+  bleuart.println("Locked!");
+}
+
+void pressUnlock() {
+  Serial.println(">>> UNLOCK");
+  bleuart.println("Unlocking...");
+  digitalWrite(STATUS_LED, HIGH);
+  
+  digitalWrite(UNLOCK_PIN, HIGH);
+  delay(300);
+  digitalWrite(UNLOCK_PIN, LOW);
+  
+  digitalWrite(STATUS_LED, LOW);
+  Serial.println(">>> UNLOCK COMPLETE");
+  bleuart.println("Unlocked!");
 }
 
 // BLE connect callback
 void connect_callback(uint16_t conn_handle) {
   Serial.println("BLE Connected!");
-  bleuart.println("KeyFob Ready! Send 'p' to press button.");
+  bleuart.println("===== KEYFOB READY =====");
+  bleuart.println("Button 1 = LOCK");
+  bleuart.println("Button 2 = UNLOCK");
 }
 
 // BLE disconnect callback
@@ -61,6 +77,12 @@ void setupBLE() {
   Bluefruit.setTxPower(4);  // Max power for range
   Bluefruit.setName("KeyFob");
   
+  // Enable BLE Security (Bonding/Pairing) - BEFORE starting services
+  Bluefruit.Security.setIOCaps(true, false, false);  // Display only (shows PIN on serial)
+  Bluefruit.Security.setMITM(true);                   // Man-in-the-middle protection
+  Bluefruit.Security.setPairPasskeyCallback(pairing_passkey_callback);
+  Bluefruit.Security.setSecuredCallback(secured_callback);
+  
   // Disable blue LED for BLE status
   Bluefruit.autoConnLed(false);
   
@@ -68,7 +90,10 @@ void setupBLE() {
   Bluefruit.Periph.setConnectCallback(connect_callback);
   Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
   
-  // Start UART service
+  // CRITICAL: Set UART permissions BEFORE begin() to REQUIRE pairing
+  bleuart.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_ENC_WITH_MITM);  // Require pairing with MITM
+  
+  // Start UART service (encryption required)
   bleuart.begin();
   
   // Start advertising
@@ -82,10 +107,46 @@ void setupBLE() {
   Bluefruit.Advertising.setFastTimeout(30);
   Bluefruit.Advertising.start(0);  // Advertise forever
   
-  Serial.println("BLE advertising as 'KeyFob'");
+  Serial.println("BLE advertising as 'KeyFob' - SECURED");
+  Serial.println("Pairing required - encryption enforced on UART");
+}
+
+// Pairing passkey callback - displays PIN to user
+bool pairing_passkey_callback(uint16_t conn_handle, uint8_t const passkey[6], bool match_request) {
+  Serial.println("===========================================");
+  Serial.println("  PAIRING REQUEST");
+  Serial.println("===========================================");
+  Serial.print("Enter this PIN on your phone: ");
+  for(int i=0; i<6; i++) {
+    Serial.print((char)passkey[i]);
+  }
+  Serial.println();
+  Serial.println("===========================================");
+  
+  // Also send to BLE UART
+  bleuart.print("Pairing PIN: ");
+  for(int i=0; i<6; i++) {
+    bleuart.print((char)passkey[i]);
+  }
+  bleuart.println();
+  
+  return true;  // Accept pairing
+}
+
+// Secured connection callback
+void secured_callback(uint16_t conn_handle) {
+  Serial.println("Connection secured (encrypted & authenticated)");
+  bleuart.println(">>> DEVICE PAIRED <<<");
+  bleuart.println("Connection secured!");
 }
 
 void setup() {
+  // CRITICAL: Enable DC/DC converter for battery operation
+  // This MUST be done before Bluefruit.begin()
+  #ifdef NRF_POWER_DCDC_ENABLED
+    NRF_POWER->DCDCEN = 1;
+  #endif
+  
   // Disable all LEDs first
   pinMode(STATUS_LED, OUTPUT);
   digitalWrite(STATUS_LED, LOW);
@@ -98,12 +159,14 @@ void setup() {
   delay(500);
   
   Serial.println("===========================================");
-  Serial.println("  KEY FOB TRIGGER - BLE");
+  Serial.println("  KEY FOB TRIGGER - BLE (Battery Mode)");
   Serial.println("===========================================");
   
-  // Setup trigger pin
-  pinMode(TRIGGER_PIN, OUTPUT);
-  releaseButton();  // Start released (LOW)
+  // Setup trigger pins
+  pinMode(LOCK_PIN, OUTPUT);
+  pinMode(UNLOCK_PIN, OUTPUT);
+  digitalWrite(LOCK_PIN, LOW);
+  digitalWrite(UNLOCK_PIN, LOW);
   
   // Setup BLE
   setupBLE();
@@ -117,6 +180,7 @@ void setup() {
   }
   
   Serial.println("Ready! Waiting for BLE connection...");
+  Serial.println("Battery power mode enabled");
 }
 
 void loop() {
@@ -128,18 +192,21 @@ void loop() {
     Serial.print("Received: ");
     Serial.println(cmd);
     
-    // Bluefruit Connect Controller buttons (Button 1-4)
-    // Format: !B11 = Button 1 pressed, !B10 = Button 1 released
-    if (cmd.indexOf("!B11") >= 0 || cmd.indexOf("!B21") >= 0 || 
-        cmd.indexOf("!B31") >= 0 || cmd.indexOf("!B41") >= 0) {
-      triggerKeyFob();
+    // Button 1 = Lock
+    if (cmd.indexOf("!B11") >= 0 || cmd == "lock" || cmd == "1") {
+      pressLock();
     }
-    // Also support text commands
-    else if (cmd == "p" || cmd == "press" || cmd == "1") {
-      triggerKeyFob();
-    } 
+    // Button 2 = Unlock
+    else if (cmd.indexOf("!B21") >= 0 || cmd == "unlock" || cmd == "2") {
+      pressUnlock();
+    }
+    // Buttons 3 & 4 do nothing (ignored)
+    else if (cmd.indexOf("!B31") >= 0 || cmd.indexOf("!B41") >= 0) {
+      Serial.println("Button not assigned");
+    }
     else if (cmd.length() > 0 && cmd[0] != '!') {
-      bleuart.println("Use Controller buttons or send: p");
+      bleuart.println("Commands: lock, unlock, 1, 2");
+      bleuart.println("Or use Controller buttons 1-2");
     }
   }
 }
